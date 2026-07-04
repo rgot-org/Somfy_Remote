@@ -23,8 +23,13 @@ private:
   void getRollingCode();
 
 public:
-  SomfyRemote(String name, uint32_t remoteCode); // Constructor requires name and remote code
-  String getName();                              // Getter for name
-  void move(String command);                     // Method to send a command (Possible inputs: UP, DOWN, MY, PROGRAM)
+  SomfyRemote(String name, uint32_t remoteCode);
+  String getName();
+  void move(String command); // UP, DOWN, MY, PROGRAM
+
+  // Doit être appelé une fois dans setup() avant le premier move()
+  // sck, miso, mosi, cs : broches SPI
+  // gdo0 : broche GDO0 du CC1101 (entrée données TX en mode async)
+  static void begin(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs, uint8_t gdo0);
 };
 #endif

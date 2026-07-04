@@ -4,21 +4,29 @@ This library is based on the Arduino sketch by Nickduino: https://github.com/Nic
 
 #include "Somfy_Remote.h"
 
-#if defined __AVR_ATmega168__
-#define EEPROM_SIZE 512
-#elif defined __AVR_ATmega328__
-#define EEPROM_SIZE 1024
-#elif defined __AVR_ATmega2560__
-#define EEPROM_SIZE 4096
-#elif ESP32 || ESP8266
-#define EEPROM_SIZE 512
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328__)
+  #define EEPROM_SIZE 1024
+#elif defined(__AVR_ATmega2560__)
+  #define EEPROM_SIZE 4096
+#else // ESP32 / ESP8266
+  #define EEPROM_SIZE 512
 #endif
 
-const uint16_t symbol = 604;
+static const uint16_t symbol = 604;
+
+// Broches configurables via begin()
+static uint8_t s_gdo0 = 255;
 
 uint8_t currentEppromAddress = 0;
-uint8_t gdo0Pin;
-uint8_t gdo2Pin;
+
+// ---------------------------------------------------------------------------
+
+void SomfyRemote::begin(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs, uint8_t gdo0)
+{
+  s_gdo0 = gdo0;
+  ELECHOUSE_cc1101.setSpiPin(sck, miso, mosi, cs);
+  ELECHOUSE_cc1101.setGDO(gdo0, gdo0); // gdo0 utilisé pour les deux (GDO2 non câblé)
+}
 
 // Constructor
 SomfyRemote::SomfyRemote(String name, uint32_t remoteCode)
@@ -28,72 +36,51 @@ SomfyRemote::SomfyRemote(String name, uint32_t remoteCode)
   _eepromAddress = getNextEepromAddress();
 }
 
-// Getter for name
 String SomfyRemote::getName()
 {
   return _name;
 }
 
-// Generates the next available EEPROM address
 uint16_t SomfyRemote::getNextEepromAddress()
 {
-  uint8_t eppromAddress = currentEppromAddress;
-
-  // Every address gets 4 bytes of space to save the rolling code0
-  currentEppromAddress = currentEppromAddress + 4;
-
-  return eppromAddress;
+  uint8_t addr = currentEppromAddress;
+  currentEppromAddress += 4;
+  return addr;
 }
 
-// Reads the current rolling code
 void SomfyRemote::getRollingCode()
 {
-  // Set new rolling code if not already set
   if (EEPROM.get(_eepromAddress, _rollingCode) < 1)
   {
     _rollingCode = 1;
   }
 }
 
-// Send a command to the blinds
 void SomfyRemote::move(String command)
 {
-  const uint8_t up = 0x2;
+  const uint8_t my   = 0x1;
+  const uint8_t up   = 0x2;
   const uint8_t down = 0x4;
-  const uint8_t my = 0x1;
   const uint8_t prog = 0x8;
 
   uint8_t frame[7];
 
   EEPROM.begin(EEPROM_SIZE);
-
   getRollingCode();
 
-  // Build frame according to selected command
   command.toUpperCase();
 
   switch (command[0])
   {
-  case 'U':
-    buildFrame(frame, up);
-    break;
-  case 'D':
-    buildFrame(frame, down);
-    break;
-  case 'M':
-    buildFrame(frame, my);
-    break;
-  case 'P':
-    buildFrame(frame, prog);
-    break;
-  default:
-    buildFrame(frame, my);
-    break;
+    case 'U': buildFrame(frame, up);   break;
+    case 'D': buildFrame(frame, down); break;
+    case 'M': buildFrame(frame, my);   break;
+    case 'P': buildFrame(frame, prog); break;
+    default:  buildFrame(frame, my);   break;
   }
 
-  // Send the frame according to Somfy RTS protocol
   sendCommand(frame, 2);
-  for (int i = 0; i < 2; i = i + 1)
+  for (int i = 0; i < 2; i++)
   {
     sendCommand(frame, 7);
   }
@@ -101,123 +88,90 @@ void SomfyRemote::move(String command)
   EEPROM.commit();
 }
 
-// Build frame according to Somfy RTS protocol
 void SomfyRemote::buildFrame(uint8_t *frame, uint8_t command)
 {
   uint8_t checksum = 0;
 
-  frame[0] = 0xA7;              // Encryption key.
-  frame[1] = command << 4;      // Selected command. The 4 LSB are the checksum
-  frame[2] = _rollingCode >> 8; // Rolling code (big endian)
-  frame[3] = _rollingCode;      // Rolling code
-  frame[4] = _remoteCode >> 16; // Remote address
-  frame[5] = _remoteCode >> 8;  // Remote address
-  frame[6] = _remoteCode;       // Remote address
+  frame[0] = 0xA7;
+  frame[1] = command << 4;
+  frame[2] = _rollingCode >> 8;
+  frame[3] = _rollingCode;
+  frame[4] = _remoteCode >> 16;
+  frame[5] = _remoteCode >> 8;
+  frame[6] = _remoteCode;
 
-  // Checksum calculation (XOR of all nibbles)
-  for (uint8_t i = 0; i < 7; i = i + 1)
+  for (uint8_t i = 0; i < 7; i++)
   {
-    checksum = checksum ^ frame[i] ^ (frame[i] >> 4);
+    checksum ^= frame[i] ^ (frame[i] >> 4);
   }
-  checksum &= 0b1111; // Keep the last 4 bits only
+  frame[1] |= (checksum & 0x0F);
 
-  //Checksum integration
-  frame[1] |= checksum; //  If a XOR of all the nibbles is equal to 0, the blinds will
-                        // consider the checksum ok.
-
-  // Obfuscation (XOR of all bytes)
-  for (uint8_t i = 1; i < 7; i = i + 1)
+  for (uint8_t i = 1; i < 7; i++)
   {
     frame[i] ^= frame[i - 1];
   }
 
-  _rollingCode = _rollingCode + 1;
-
-  EEPROM.put(_eepromAddress, _rollingCode); //  Store the new value of the rolling code in the EEPROM.
+  _rollingCode++;
+  EEPROM.put(_eepromAddress, _rollingCode);
 }
 
-// Send frame according to Somfy RTS protocol
 void SomfyRemote::sendCommand(uint8_t *frame, uint8_t sync)
 {
   if (sync == 2)
-  { // Only with the first frame.
-
-// Set pins according to module
-#if defined __AVR_ATmega168__ || defined __AVR_ATmega328__ || defined __AVR_ATmega2560__
-    gdo0Pin = 2;
-    gdo2Pin = 3;
-#elif ESP32 || ESP8266
-    gdo0Pin = 2;
-    gdo2Pin = 4;
-#endif
-
-    ELECHOUSE_cc1101.setGDO(gdo0Pin, gdo2Pin);
-
-    // Initialize radio chip
+  {
+    // Initialisation CC1101 au premier appel
     ELECHOUSE_cc1101.Init();
-
-    // Enable transmission at 433.42 MHz
     ELECHOUSE_cc1101.SetTx(433.42);
 
-    // Wake-up pulse & Silence
-    digitalWrite(gdo2Pin, HIGH); // High
+    pinMode(s_gdo0, OUTPUT);
+
+    // Impulsion réveil
+    digitalWrite(s_gdo0, HIGH);
     delayMicroseconds(9415);
-    digitalWrite(gdo2Pin, LOW); // Low
+    digitalWrite(s_gdo0, LOW);
     delayMicroseconds(89565);
   }
 
-  // Hardware sync: two sync for the first frame, seven for the following ones.
-  for (int i = 0; i < sync; i = i + 1)
+  // Synchronisation matérielle
+  for (int i = 0; i < sync; i++)
   {
-    digitalWrite(gdo2Pin, HIGH); // PIN 2 HIGH
+    digitalWrite(s_gdo0, HIGH);
     delayMicroseconds(4 * symbol);
-    digitalWrite(gdo2Pin, LOW); // PIN 2 LOW
+    digitalWrite(s_gdo0, LOW);
     delayMicroseconds(4 * symbol);
   }
 
-  // Software sync
-  digitalWrite(gdo2Pin, HIGH); // PIN 2 HIGH
+  // Synchronisation logicielle
+  digitalWrite(s_gdo0, HIGH);
   delayMicroseconds(4550);
-  digitalWrite(gdo2Pin, LOW); // PIN 2 LOW
+  digitalWrite(s_gdo0, LOW);
   delayMicroseconds(symbol);
 
-  //Data: bits are sent one by one, starting with the MSB.
-  for (uint8_t i = 0; i < 56; i = i + 1)
+  // Données (56 bits, encodage Manchester)
+  for (uint8_t i = 0; i < 56; i++)
   {
-    if (((frame[i / 8] >> (7 - (i % 8))) & 1) == 1)
-    {
-      sendBit(true);
-    }
-    else
-    {
-      sendBit(false);
-    }
+    sendBit((frame[i / 8] >> (7 - (i % 8))) & 1);
   }
-  digitalWrite(gdo2Pin, LOW); // PIN 2 LOW
-  delayMicroseconds(30415);   // Inter-frame silence
+
+  digitalWrite(s_gdo0, LOW);
+  delayMicroseconds(30415);
 }
 
-// Send one bit
 void SomfyRemote::sendBit(bool value)
 {
-  uint8_t firstState;
-  uint8_t secondState;
-
-  // Decide which bit to send (Somfy RTS bits are manchester encoded: 0 = high->low 1 = low->high)
-  if (value == true)
+  // Manchester Somfy : 1 = LOW→HIGH, 0 = HIGH→LOW
+  if (value)
   {
-    firstState = LOW;
-    secondState = HIGH;
+    digitalWrite(s_gdo0, LOW);
+    delayMicroseconds(symbol);
+    digitalWrite(s_gdo0, HIGH);
+    delayMicroseconds(symbol);
   }
-  else if (value == false)
+  else
   {
-    firstState = HIGH;
-    secondState = LOW;
+    digitalWrite(s_gdo0, HIGH);
+    delayMicroseconds(symbol);
+    digitalWrite(s_gdo0, LOW);
+    delayMicroseconds(symbol);
   }
-
-  // Send the bit
-  digitalWrite(gdo2Pin, firstState);
-  delayMicroseconds(symbol);
-  digitalWrite(gdo2Pin, secondState);
-  delayMicroseconds(symbol);
 }
